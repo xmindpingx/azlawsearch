@@ -383,24 +383,50 @@ def ics():
                         "END:VEVENT", "END:VCALENDAR", ""])
     r = make_response(body); r.headers["Content-Type"] = "text/calendar"; r.headers["Content-Disposition"] = f"attachment; filename=payment-{case}-{d}.ics"; return r
 
+def bookmarklet(host):
+    """Runs on the mcso.org result page AFTER the person ticked the CAPTCHA: copies the page source to the clipboard
+    and opens the watcher's Import tab, where one paste records custody + bond. No CAPTCHA is touched."""
+    js = ("(function(){var h='<!--url:'+location.href+'-->'+document.documentElement.outerHTML;"
+          "navigator.clipboard.writeText(h).then(function(){window.open('http://%s/import?paste=1&site=maricopa_inmate','_blank')},"
+          "function(){alert('Clipboard blocked - use Ctrl+U, select all, copy, then paste on the Import tab')})})()" % host)
+    return "javascript:" + urllib.parse.quote(js, safe="()'=;:/.,&?%+-_")
+
 @app.get("/import")
 def import_page():
     s = store()
-    return page(T.IMPORT, "import", "Import", people=s.people(), imports=s.q("SELECT * FROM imports ORDER BY id DESC LIMIT 50"))
+    helpers = []
+    for p in s.people():
+        m = re.fullmatch(r"(\d{2})/(\d{2})/(\d{4})", p["dob"] or "")
+        helpers.append({"p": p, "dob8": f"{m.group(3)}{m.group(1)}{m.group(2)}" if m else ""})
+    return page(T.IMPORT, "import", "Import", people=s.people(), imports=s.q("SELECT * FROM imports ORDER BY id DESC LIMIT 50"),
+                paste=request.args.get("paste"), site_pre=request.args.get("site", ""), helpers=helpers, bookmarklet=bookmarklet(request.host))
 
 @app.post("/import")
 def import_post():
-    s = store(); f = request.files["file"]; body = f.read()
-    site, pid, cn = request.form.get("site", "other"), int(request.form["person_id"]), request.form["case_number"].strip()
-    snap = base.save_snapshot(site, f"import:{cn}", f"file://{f.filename}", body, "text/html")
+    s = store()
+    f = request.files.get("file")
+    pasted = request.form.get("html", "").strip()
+    if f and f.filename:
+        body, fname = f.read(), f.filename
+    elif pasted:
+        body, fname = pasted.encode("utf-8"), "pasted-page.html"
+    else:
+        flash("Choose a file or paste the page source"); return redirect("/import")
+    site, pid = request.form.get("site", "other"), int(request.form["person_id"])
+    cn = request.form.get("case_number", "").strip()
+    if not cn:
+        m = re.search(r"<!--url:([^>]+)-->", pasted) if pasted else None
+        bk = re.search(r"Booking\s*(?:Number|#)\s*:?\s*([A-Z0-9-]{6,})", base.norm_ws(base.soup(body).get_text(" ", strip=True)), re.I)
+        cn = bk.group(1) if bk else ("mcso-lookup-" + datetime.date.today().isoformat() if site == "maricopa_inmate" else "MISSING_DATA")
+    snap = base.save_snapshot(site, f"import:{cn}", f"file://{fname}", body, "text/html")
     s.snapshot(snap)
     title, entries = azcourts.parse_saved(body)
     from courtwatch.sites import mcso as _mcso
     url = {"azcourts": azcourts.URL, "maricopa_inmate": _mcso.MARICOPA_INMATE_URL}.get(site, "")
     cid, _ = s.upsert_case(pid, site, cn, court=request.form.get("court", ""), url=url, title=title)
     new = s.add_entries(cid, entries, snap, snap.url)
-    s.x("INSERT INTO imports(at, site, person_id, filename, sha256, path, note, rows) VALUES (?,?,?,?,?,?,?,?)", now(), site, pid, f.filename, snap.sha256, snap.path, request.form.get("note", ""), len(entries))
-    msg = f"Imported {len(entries)} table rows ({len(new)} new) from {f.filename} into case {cn}"
+    s.x("INSERT INTO imports(at, site, person_id, filename, sha256, path, note, rows) VALUES (?,?,?,?,?,?,?,?)", now(), site, pid, fname, snap.sha256, snap.path, request.form.get("note", ""), len(entries))
+    msg = f"Imported {len(entries)} table rows ({len(new)} new) from {fname} into case {cn}"
     if site == "maricopa_inmate":
         txt = base.norm_ws(base.soup(body).get_text(" ", strip=True))
         not_found = re.search(r"not currently in custody|cannot be found", txt, re.I)

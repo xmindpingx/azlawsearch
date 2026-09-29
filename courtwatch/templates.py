@@ -228,12 +228,25 @@ PAYMENTS = r"""{% extends "base" %}{% block body %}
 
 IMPORT = r"""{% extends "base" %}{% block body %}
 <h1>Import a saved page</h1>
-<div class="card"><p class="small">For sites this watcher cannot search on its own (AZ Courts public access has an image CAPTCHA): run the search in your browser, save the results or case page (Ctrl+S → "Webpage, Complete" or .html), and upload it here. Every table on the page is stored verbatim under the person and case you choose.</p>
+<div class="card"><h2>Maricopa County custody check (mcso.org) - CAPTCHA assist</h2>
+<p class="small">The inmate lookup at <a href="https://www.mcso.org/InmateInfo" target="_blank">mcso.org/InmateInfo ↗</a> makes a person tick a reCAPTCHA box. The watcher never touches that box. What it does automate is everything after it:</p>
+<ol class="small">
+<li>Drag this to your bookmarks bar once: <a class="btn alt" href="{{ bookmarklet }}" onclick="return false" title="drag me to the bookmarks bar">📋 Send MCSO page to Court Watch</a></li>
+<li>On mcso.org, pick <b>Search by Name &amp; DOB</b>, enter the name and the DOB below, tick the CAPTCHA, search.</li>
+<li>On the result page click the bookmark: it copies the page and opens this tab - pick the person, paste, Import. Custody, booking # and bond amount are recorded and the 🔒 badge updates.</li>
+</ol>
+<table><tr><th>Person</th><th>Last</th><th>First</th><th>DOB as mcso.org wants it (YYYYMMDD)</th></tr>
+{% for h in helpers %}<tr><td>{{ h.p.last }}, {{ h.p.first }}</td><td><code>{{ h.p.last }}</code></td><td><code>{{ h.p.first }}</code></td><td>{% if h.dob8 %}<code>{{ h.dob8 }}</code>{% else %}<span class="warn">no DOB on file - needed for this lookup</span>{% endif %}</td></tr>{% endfor %}
+</table></div>
+
+<div class="card"><p class="small">Also for AZ Courts public access (image CAPTCHA): run the search in your browser, then either save the page (Ctrl+S → "Webpage, Complete" / .html) and upload it, or Ctrl+U, copy all, and paste the source below. Every table on the page is stored verbatim under the person and case you choose.</p>
 <form method="post" action="/import" enctype="multipart/form-data">
 <div class="row"><select name="person_id">{% for p in people %}<option value="{{ p.id }}">{{ p.last }}, {{ p.first }}</option>{% endfor %}</select>
-<select name="site"><option value="azcourts">AZ Courts public access</option><option value="maricopa_inmate">Maricopa inmate page (mcso.org/InmateInfo)</option><option value="other">other site</option></select>
-<input type="text" name="case_number" placeholder="Case number (as printed)" required><input type="text" name="court" placeholder="Court name (as printed)"><input type="text" name="note" placeholder="Note"></div>
-<div class="row"><input type="file" name="file" accept=".html,.htm,.mhtml,.txt" required><button>Import</button></div></form></div>
+<select name="site"><option value="maricopa_inmate" {{ 'selected' if site_pre=='maricopa_inmate' }}>Maricopa inmate page (mcso.org/InmateInfo)</option><option value="azcourts" {{ 'selected' if site_pre=='azcourts' }}>AZ Courts public access</option><option value="other">other site</option></select>
+<input type="text" name="case_number" placeholder="Case / booking number (optional - read from the page if blank)"><input type="text" name="court" placeholder="Court name (as printed)"><input type="text" name="note" placeholder="Note"></div>
+<div class="row"><input type="file" name="file" accept=".html,.htm,.mhtml,.txt"><span class="mut small">or paste below</span></div>
+<div class="row"><textarea name="html" placeholder="paste the page source here (Ctrl+V)" style="width:100%;min-height:{{ '160px' if paste else '60px' }};background:#0f1115;color:var(--fg);border:1px solid var(--line);border-radius:9px;padding:8px" {% if paste %}autofocus{% endif %}></textarea></div>
+<div class="row"><button>Import</button></div></form></div>
 <div class="card"><table><tr><th>When</th><th>Site</th><th>Person</th><th>File</th><th>Rows</th><th>Note</th></tr>
 {% for i in imports %}<tr><td class="small mut">{{ i.at[:16] }}</td><td>{{ i.site }}</td><td>{{ people_names.get(i.person_id) }}</td><td class="small">{{ i.filename }}</td><td>{{ i.rows }}</td><td class="small">{{ i.note }}</td></tr>{% endfor %}</table></div>
 {% endblock %}"""
