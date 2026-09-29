@@ -1,0 +1,25 @@
+# azlawsearch - standalone. Only the watcher + its own SQLite DB; no EDISON/Qdrant export.
+services:
+  azlawsearch:
+    build: .
+    container_name: azlawsearch
+    restart: unless-stopped
+    ports: ["0.0.0.0:${PORT:-8095}:8090"]
+    shm_size: "1g"
+    environment:
+      TZ: ${TZ:-America/Phoenix}
+      WATCH_TIMES: ${WATCH_TIMES:-06:00,12:00,18:00}
+      WATCH_ME: ${WATCH_ME:-}
+      WATCH_POWERBI_URL: ${WATCH_POWERBI_URL:-}
+      WATCH_DISABLED_SITES: ${WATCH_DISABLED_SITES:-}
+      RUN_ON_START: ${RUN_ON_START:-1}
+      CW_PIN: ${CW_PIN:-}
+      EDISON_EXPORT: ${EDISON_EXPORT:-0}
+      # only used when EDISON_EXPORT=1 and an EDISON stack is reachable:
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      EDISON_DB: /data/edison.db
+      CW_SCHEMA: /app/schema.json
+    volumes:
+      - ./data:/data
