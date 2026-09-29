@@ -31,7 +31,7 @@ label.chk{display:inline-flex;gap:6px;align-items:center;padding:6px 10px;border
 {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="card warn">{{ m }}</div>{% endfor %}{% endwith %}
 {% macro badges(b) -%}
 {% if b.warrant %}<span class="badge warrant" title="latest DPS warrant search returned results">🚨 WARRANT</span>{% endif %}
-{% for c in b.custody %}<span class="badge custody" title="{{ c.source }} · {{ c.seen_at[:16] }}">🔒 IN CUSTODY{% if c.bond_raw and c.bond_raw != 'MISSING_DATA (roster shows no bond)' %} · bond {{ c.bond_raw }}{% else %} · bond MISSING_DATA{% endif %}</span>{% endfor %}
+{% for c in b.custody %}<span class="badge custody" title="{{ c.source }} · {{ c.seen_at[:16] }}">🔒 IN CUSTODY{% if c.bond_raw %} · bond {{ c.bond_raw }}{% else %} · bond MISSING_DATA{% endif %}</span>{% endfor %}
 {% if b.new_info %}<span class="badge newinfo" title="unread new information since last checked">🆕 {{ b.new_info }} new</span>{% endif %}
 {%- endmacro %}
 {% block body %}{% endblock %}
@@ -149,10 +149,10 @@ NAMES = r"""{% extends "base" %}{% block body %}
  {% for w in p.warrants %}<tr><td class="small mut">{{ w.checked_at[:16] }}</td><td><span class="pill {{ w.status }}">{{ w.status }}</span></td><td class="small">{{ w.text[:200] }} <a href="/snapshot?path={{ w.snapshot_path|urlencode }}" target="_blank">page copy</a></td></tr>{% endfor %}
  {% if not p.warrants %}<tr><td colspan="3" class="mut">none yet{% if not p.dob %} (needs a DOB){% endif %}</td></tr>{% endif %}</table>
 
- <h2>Jail roster matches (MCSO)</h2>
- <table><tr><th>Booking #</th><th>Name on roster</th><th>DOB</th><th>Status</th><th>Booked</th><th>Still listed</th></tr>
- {% for m in p.arrests %}<tr><td><a href="{{ m.detail_url }}" target="_blank">{{ m.booking_no }}</a></td><td>{{ m.name }}</td><td>{{ m.dob }}</td><td>{{ m.status }}</td><td>{{ m.booking_date }}</td><td>{{ 'no - gone ' + m.gone_at[:10] if m.gone_at else 'yes' }}</td></tr>{% endfor %}
- {% if not p.arrests %}<tr><td colspan="6" class="mut">no matches on any roster pull</td></tr>{% endif %}</table>
+ <h2>AZ Dept. of Corrections (state prison) records</h2>
+ <table><tr><th>ADC#</th><th>Status</th><th>Name on record</th><th>Admitted</th><th>Age vs. stated DOB</th></tr>
+ {% for c in p.adcrr %}<tr><td>{{ c.case_number }}</td><td>{{ c.hdr.get('Status searched','') }}</td><td>{{ c.party_name }}</td><td>{{ c.hdr.get('Admission','') }}</td><td class="{{ 'bad' if 'INCONSISTENT' in c.hdr.get('Age vs. stated DOB','') else 'mut' }} small">{{ c.hdr.get('Age vs. stated DOB','') }}</td></tr>{% endfor %}
+ {% if not p.adcrr %}<tr><td colspan="5" class="mut">no ADCRR records found - name + first-initial match only, no DOB field on that site</td></tr>{% endif %}</table>
 
  <h2>Alerts (last 40)</h2>
  {% for a in p.alerts %}<div class="alert {{ a.kind }}"><span class="mut small">{{ a.created_at[:16] }} · {{ a.site }} · {{ a.kind }}</span><br>{{ a.text }} {% if a.url %}<a href="{{ a.url }}" target="_blank">open</a>{% endif %}</div>{% endfor %}
@@ -192,14 +192,12 @@ WARRANTS = r"""{% extends "base" %}{% block body %}
 
 ARRESTS = r"""{% extends "base" %}{% block body %}
 <h1>Arrests</h1>
-<div class="card"><b>Jail roster - portal.mobileso.com</b> <span class="warn small">(this page is the Mobile County Sheriff, Alabama, roster - not Maricopa)</span> · <a href="https://www.mcso.org/InmateInfo" target="_blank">Maricopa County inmate lookup ↗</a> (CAPTCHA - import the result page) <span class="mut small">last pull: {{ mcso.at if mcso else 'never' }} · {{ mcso.title if mcso else '' }} · {{ mcso.rows if mcso else 0 }} rows ({{ mcso.new_rows if mcso else 0 }} new that pull) · {{ roster_total }} bookings retained locally</span>
-<h2>Matches against the names list</h2>
-<table><tr><th>Person</th><th>Booking #</th><th>Name on roster</th><th>DOB</th><th>Status</th><th>Booked</th><th>Expected release</th><th>Still listed</th></tr>
-{% for m in matches %}<tr><td>{{ people_names.get(m.person_id) }}</td><td><a href="{{ m.detail_url }}" target="_blank">{{ m.booking_no }}</a></td><td>{{ m.name }}</td><td>{{ m.dob }}</td><td>{{ m.status }}</td><td>{{ m.booking_date }}</td><td>{{ m.expected_release }}</td><td>{{ 'no - gone ' + m.gone_at[:10] if m.gone_at else 'yes' }}</td></tr>{% endfor %}
-{% if not matches %}<tr><td colspan="8" class="mut">No one on the names list appears on the roster pulls so far.</td></tr>{% endif %}</table>
-<form method="get" action="/arrests"><div class="row"><input type="text" name="mq" placeholder="search roster: LAST,FIRST or booking # or DOB" value="{{ mq }}" style="flex:1"><button class="alt">Search roster</button></div></form>
-{% if mrows is not none %}<table><tr><th>Booking #</th><th>Name</th><th>DOB</th><th>Status</th><th>Booked</th><th>First seen</th><th>Last seen</th></tr>
-{% for r in mrows %}<tr><td><a href="{{ r.detail_url }}" target="_blank">{{ r.booking_no }}</a></td><td>{{ r.name }}</td><td>{{ r.dob }}</td><td>{{ r.status }}</td><td>{{ r.booking_date }}</td><td class="small mut">{{ r.first_seen[:10] }}</td><td class="small mut">{{ r.last_seen[:10] }}{{ ' (gone)' if r.gone_at }}</td></tr>{% endfor %}</table>{% endif %}
+<div class="card"><b>AZ Dept. of Corrections inmate search</b> <span class="mut small">state prison records (Active + Inactive) · <a href="{{ adcrr_url }}" target="_blank">open the search directly ↗</a> · fully automated, no CAPTCHA</span>
+<div class="warn small">Name + first-initial match only - this site has no DOB field anywhere, so a hit below is NEVER a confirmed match by itself. Check the "Age vs. stated DOB" column before assuming a record belongs to anyone on the names list.</div>
+<table><tr><th>Person</th><th>ADC#</th><th>Status</th><th>Name on record</th><th>Admitted</th><th>Age vs. stated DOB</th><th></th></tr>
+{% for r in adcrr_rows %}<tr><td>{{ r.p_last }}, {{ r.p_first }}</td><td>{{ r.case_number }}</td><td>{{ r.hdr.get('Status searched','') }}</td><td>{{ r.party_name }}</td><td>{{ r.hdr.get('Admission','') }}</td><td class="{{ 'bad' if 'INCONSISTENT' in r.hdr.get('Age vs. stated DOB','') else 'mut' }} small">{{ r.hdr.get('Age vs. stated DOB','') }}</td><td><a href="/case/{{ r.id }}">details</a></td></tr>{% endfor %}
+{% if not adcrr_rows %}<tr><td colspan="7" class="mut">no ADCRR records found for anyone on the names list</td></tr>{% endif %}</table>
+<div class="small mut">Maricopa County's own jail (pretrial, not state prison) is <a href="{{ maricopa_url }}" target="_blank">mcso.org/InmateInfo ↗</a> - CAPTCHA-gated, handled on the Import tab.</div>
 </div>
 <div class="card"><b>Chandler PD arrest bookings (open data CSV)</b> <span class="mut small">last pull: {{ ch.at if ch else 'never' }} · {{ ch.rows if ch else 0 }} rows in file · {{ ch_total }} retained locally</span>
 <div class="warn small">This dataset has no names - only an arrestee number, age, race, gender - so it cannot be matched to anyone on the list. Search it by date, charge, address or report number.</div>
@@ -229,17 +227,18 @@ PAYMENTS = r"""{% extends "base" %}{% block body %}
 IMPORT = r"""{% extends "base" %}{% block body %}
 <h1>Import a saved page</h1>
 <div class="card"><h2>Maricopa County custody check (mcso.org) - CAPTCHA assist</h2>
-<p class="small">The inmate lookup at <a href="https://www.mcso.org/InmateInfo" target="_blank">mcso.org/InmateInfo ↗</a> makes a person tick a reCAPTCHA box. The watcher never touches that box. What it does automate is everything after it:</p>
+<p class="small">The inmate lookup at mcso.org makes a person tick a reCAPTCHA box. The watcher never touches that box. What it does automate is everything after it:</p>
 <ol class="small">
 <li>Drag this to your bookmarks bar once: <a class="btn alt" href="{{ bookmarklet }}" onclick="return false" title="drag me to the bookmarks bar">📋 Send MCSO page to Court Watch</a></li>
-<li>On mcso.org, pick <b>Search by Name &amp; DOB</b>, enter the name and the DOB below, tick the CAPTCHA, search.</li>
+<li><a class="btn" href="https://www.mcso.org/InmateInfo" target="_blank">🔗 Go to mcso.org/InmateInfo</a> and do the search yourself: pick <b>Search by Name &amp; DOB</b>, enter the name and the DOB below, tick the CAPTCHA, search.</li>
 <li>On the result page click the bookmark: it copies the page and opens this tab - pick the person, paste, Import. Custody, booking # and bond amount are recorded and the 🔒 badge updates.</li>
 </ol>
 <table><tr><th>Person</th><th>Last</th><th>First</th><th>DOB as mcso.org wants it (YYYYMMDD)</th></tr>
 {% for h in helpers %}<tr><td>{{ h.p.last }}, {{ h.p.first }}</td><td><code>{{ h.p.last }}</code></td><td><code>{{ h.p.first }}</code></td><td>{% if h.dob8 %}<code>{{ h.dob8 }}</code>{% else %}<span class="warn">no DOB on file - needed for this lookup</span>{% endif %}</td></tr>{% endfor %}
 </table></div>
 
-<div class="card"><p class="small">Also for AZ Courts public access (image CAPTCHA): run the search in your browser, then either save the page (Ctrl+S → "Webpage, Complete" / .html) and upload it, or Ctrl+U, copy all, and paste the source below. Every table on the page is stored verbatim under the person and case you choose.</p>
+<div class="card"><h2>AZ Courts public access - CAPTCHA assist</h2>
+<p class="small"><a class="btn" href="https://apps.azcourts.gov/publicaccess/caselookup.aspx" target="_blank">🔗 Go to apps.azcourts.gov/publicaccess and do the search yourself</a> (image CAPTCHA - human only). Then either save the page (Ctrl+S → "Webpage, Complete" / .html) and upload it, or Ctrl+U, copy all, and paste the source below. Every table on the page is stored verbatim under the person and case you choose.</p>
 <form method="post" action="/import" enctype="multipart/form-data">
 <div class="row"><select name="person_id">{% for p in people %}<option value="{{ p.id }}">{{ p.last }}, {{ p.first }}</option>{% endfor %}</select>
 <select name="site"><option value="maricopa_inmate" {{ 'selected' if site_pre=='maricopa_inmate' }}>Maricopa inmate page (mcso.org/InmateInfo)</option><option value="azcourts" {{ 'selected' if site_pre=='azcourts' }}>AZ Courts public access</option><option value="other">other site</option></select>

@@ -4,7 +4,7 @@ The 3x/day run. For every active person on the names list, query every enabled s
 """
 import json, os, re, traceback, datetime
 from .db import Store, now
-from .sites import base, superior, justice, dps, mcso, chandler, powerbi, azcourts
+from .sites import base, superior, justice, dps, chandler, powerbi, azcourts
 from .sites.base import Http
 from . import edison_export
 
@@ -14,7 +14,7 @@ SITES = {   # key -> (label, needs_dob, kind)
     "mesa":     ("Mesa Municipal Court eCourt", False, "person"),
     "dps":      ("AZ DPS warrant search", True, "person"),
     "azcourts": ("AZ Courts public access (manual - image CAPTCHA)", False, "person"),
-    "mcso":     ("Jail roster - portal.mobileso.com (Mobile County Sheriff, Alabama)", False, "bulk"),
+    "adcrr":    ("AZ Dept. of Corrections inmate search (state prison, Active+Inactive)", False, "person"),
     "chandler": ("Chandler PD arrest bookings CSV", False, "bulk"),
     "powerbi":  ("Power BI Gov report capture", False, "bulk"),
 }
@@ -141,48 +141,54 @@ def run_mesa(store, person, run_id, first_run, log):
         log(f"  mesa FAILED: {e!r}")
         store.result(run_id, person["id"], "mesa", "failed", message=repr(e)[:500])
 
-def run_mcso(store, http, people, run_id, log):
+def run_adcrr(store, person, run_id, first_run, log):
+    """
+    AZ Dept. of Corrections state-prison search. Name + first-initial only -- the site has no DOB
+    field at all, so a hit here can NEVER be confirmed as the same person by DOB. Age (only visible
+    once a specific record is opened) is checked against the person's stated DOB purely as a sanity
+    flag; an inconsistent age is surfaced as a likely non-match, never silently attributed.
+    """
+    from .sites import adcrr
     try:
-        r = mcso.fetch(http)
+        pairs, snaps = adcrr.search_person(person["last"], (person["first"] or "")[:1], person_dob=person["dob"] or "")
+        for s in snaps:
+            store.snapshot(s)
     except Exception as e:
-        store.result(run_id, 0, "mcso", "failed", message=repr(e)); return
-    t = now(); new_rows = 0
-    seen = set()
-    for row in r["rows"]:
-        seen.add(row["booking_no"])
-        ex = store.one("SELECT booking_no FROM mcso_roster WHERE booking_no=?", row["booking_no"])
-        if ex:
-            store.x("UPDATE mcso_roster SET status=?, expected_release=?, arrival_date=?, last_seen=?, gone_at='' WHERE booking_no=?",
-                    row["status"], row["expected_release"], row["arrival_date"], t, row["booking_no"])
-        else:
-            new_rows += 1
-            store.x("INSERT INTO mcso_roster(booking_no,name,race,sex,dob,status,age,booking_date,arrival_date,expected_release,detail_url,first_seen,last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    row["booking_no"], row["name"], row["race"], row["sex"], row["dob"], row["status"], row["age"], row["booking_date"],
-                    row["arrival_date"], row["expected_release"], row["detail_url"], t, t)
-    store.x("UPDATE mcso_roster SET gone_at=? WHERE gone_at='' AND last_seen<>?", t, t)
-    store.x("INSERT INTO mcso_fetches(at,title,rows,new_rows,snapshot_path,sha256) VALUES (?,?,?,?,?,?)", t, r["title"], len(r["rows"]), new_rows, r["snapshot"].path, r["snapshot"].sha256)
-    store.snapshot(r["snapshot"])
-    log(f"  mcso: {r['title']} rows={len(r['rows'])} new={new_rows}")
-    for p in people:
-        matches = [row for row in r["rows"] if mcso.name_matches(row, p["last"], p["first"], p["dob"] or "")]
-        for row in matches:
-            try:
-                store.x("INSERT INTO mcso_matches(person_id, booking_no, first_seen) VALUES (?,?,?)", p["id"], row["booking_no"], t)
-                store.alert(p["id"], "mcso", "arrest_match", f"{mcso.ROSTER_LABEL} lists {row['name']} DOB {row['dob']} booking {row['booking_no']} booked {row['booking_date']} status {row['status']}", url=row["detail_url"])
-            except Exception:
-                pass
-        # custody badge: listed on this pull => in custody per this roster (bond is not shown on the roster page)
-        last = store.one("SELECT in_custody FROM custody_status WHERE person_id=? AND source=? ORDER BY id DESC LIMIT 1", p["id"], mcso.SITE)
-        if matches:
-            m = matches[0]
-            if not last or not last["in_custody"]:
-                store.custody(p["id"], mcso.SITE, True, bond_raw="MISSING_DATA (roster shows no bond)", booking_no=m["booking_no"],
-                              details=f"{m['name']} status {m['status']} booked {m['booking_date']} expected release {m['expected_release'] or 'MISSING_DATA'}",
-                              snapshot_path=r["snapshot"].path, url=m["detail_url"])
-        elif last and last["in_custody"]:
-            store.custody(p["id"], mcso.SITE, False, details="no longer listed on the roster", snapshot_path=r["snapshot"].path)
-        store.result(run_id, p["id"], "mcso", "found" if matches else "none", found=len(matches),
-                     message=f"roster {r['title']}: {len(matches)} match(es)" + ("" if p["dob"] else " (name only - no DOB on file)"))
+        store.result(run_id, person["id"], "adcrr", "failed", message=repr(e)[:500])
+        log(f"  adcrr FAILED: {e!r}")
+        return 0, 0
+    found = new_total = 0
+    mismatches = []
+    active_hit = None
+    for hit, cd in pairs:
+        _, isnew, n = _ingest_case(store, person, hit, cd, run_id, first_run, log)
+        found += 1; new_total += n + (1 if isnew else 0)
+        av = cd.header.get("Age vs. stated DOB", "")
+        if av.startswith("INCONSISTENT"):
+            mismatches.append(f"ADC#{hit.case_number}: {av}")
+        if cd.header.get("Status searched") == "Active":
+            active_hit = (hit, cd)
+    last = store.one("SELECT in_custody FROM custody_status WHERE person_id=? AND source='adcrr' ORDER BY id DESC LIMIT 1", person["id"])
+    if active_hit:
+        hit, cd = active_hit
+        if not last or not last["in_custody"]:
+            store.custody(person["id"], "adcrr", True,
+                          bond_raw="not applicable (state prison sentence, not a bailable pretrial hold)",
+                          booking_no=hit.case_number,
+                          details=f"{hit.party_name} - status {cd.header.get('Status searched','MISSING_DATA')} - admitted {hit.extra.get('admitted','MISSING_DATA')}",
+                          snapshot_path=cd.snapshot.path, url=adcrr.BASE)
+    elif last and last["in_custody"]:
+        store.custody(person["id"], "adcrr", False, details="no longer listed as Active on ADCRR",
+                      snapshot_path=snaps[-1].path if snaps else "")
+    if mismatches:
+        store.alert(person["id"], "adcrr", "unverified_mismatch",
+                    "ADCRR hit(s) with an age inconsistent with the stated DOB - likely NOT the same person: " + "; ".join(mismatches),
+                    url=adcrr.BASE)
+    msg = f"{found} ADCRR record(s) (name + first-initial only - site has no DOB field; a hit is never a confirmed match by itself)"
+    if mismatches:
+        msg += " | possible non-match flagged: " + "; ".join(mismatches)
+    store.result(run_id, person["id"], "adcrr", "found" if found else "none", found=found, new_items=new_total, message=msg)
+    return found, new_total
 
 def run_chandler(store, http, run_id, log):
     try:
@@ -218,6 +224,7 @@ def run_powerbi(store, run_id, log):
     store.result(run_id, 0, "powerbi", "found", found=meta["pages"], message=f"{meta['pages']} page(s), {len(meta['responses'])} data responses captured")
     log(f"  powerbi: pages={meta['pages']} responses={len(meta['responses'])}")
 
+
 def run(trigger="scheduled", people_ids=None, sites=None, log=print):
     store = Store()
     sites = sites or [s for s in DEFAULT_SITES if s not in os.environ.get("WATCH_DISABLED_SITES", "").split(",")]
@@ -237,10 +244,10 @@ def run(trigger="scheduled", people_ids=None, sites=None, log=print):
             run_mesa(store, p, run_id, first_run, log)
         if "dps" in sites:
             run_dps(store, http, p, run_id, log)
+        if "adcrr" in sites:
+            run_adcrr(store, p, run_id, first_run, log)
         if "azcourts" in sites:
             store.result(run_id, p["id"], "azcourts", "manual_required", message=azcourts.MANUAL_REASON)
-    if "mcso" in sites:
-        run_mcso(store, http, people, run_id, log)
     if "chandler" in sites:
         run_chandler(store, http, run_id, log)
     if "powerbi" in sites:

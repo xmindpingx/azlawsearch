@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS alerts (
   text TEXT, seen INTEGER DEFAULT 0, url TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS warrant_checks (
   id INTEGER PRIMARY KEY, person_id INTEGER, checked_at TEXT, status TEXT, text TEXT, snapshot_sha TEXT, snapshot_path TEXT, url TEXT);
+-- mcso_roster / mcso_matches / mcso_fetches: retained for existing installs (dropping a live table isn't
+-- done casually) but no longer populated. The Mobile County (AL) roster integration was removed and
+-- replaced by sites/adcrr.py (AZ Dept. of Corrections, state prison, cases table site='adcrr').
 CREATE TABLE IF NOT EXISTS mcso_roster (
   booking_no TEXT PRIMARY KEY, name TEXT, race TEXT, sex TEXT, dob TEXT, status TEXT, age TEXT, booking_date TEXT,
   arrival_date TEXT, expected_release TEXT, detail_url TEXT, first_seen TEXT, last_seen TEXT, gone_at TEXT DEFAULT '');

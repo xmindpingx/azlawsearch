@@ -25,9 +25,11 @@ app = Flask(__name__)
 app.secret_key = hashlib.sha256((PIN or "court-watch").encode()).hexdigest()
 app.jinja_loader = DictLoader({"base": T.BASE})
 
-LIVE_SITES = [("superior", "Superior Court (Family/Criminal/Civil/Probate)"), ("justice", "Justice Courts"), ("mesa", "Mesa eCourt"), ("dps", "DPS warrants")]
-LOCAL_SITES = [("cases", "cases & docket rows"), ("mcso", "MCSO roster"), ("chandler", "Chandler bookings"), ("powerbi", "Power BI captures"), ("imports", "imported pages")]
+LIVE_SITES = [("superior", "Superior Court (Family/Criminal/Civil/Probate)"), ("justice", "Justice Courts"), ("mesa", "Mesa eCourt"), ("dps", "DPS warrants"), ("adcrr", "AZ DOC (state prison)")]
+LOCAL_SITES = [("cases", "cases & docket rows"), ("chandler", "Chandler bookings"), ("powerbi", "Power BI captures"), ("imports", "imported pages")]
 SITE_LABELS = {k: v[0] for k, v in watch.SITES.items()}
+MARICOPA_INMATE_URL = "https://www.mcso.org/InmateInfo"   # Maricopa County's own jail (pretrial) - CAPTCHA-gated, manual import only
+ADCRR_URL = "https://inmatedatasearch.azcorrections.gov/"  # AZ state prison search - no CAPTCHA, fully automated (see watch.SITES["adcrr"])
 
 # ---------------- background jobs ----------------
 JOBS, JOBS_LOCK, _jid = {}, threading.Lock(), [0]
@@ -166,7 +168,8 @@ def person_bundle(p):
         cd = dict(c); cd["rows"] = s.one("SELECT COUNT(*) c FROM entries WHERE case_id=?", c["id"])["c"]; cases.append(cd)
     d["cases"] = cases
     d["warrants"] = s.q("SELECT * FROM warrant_checks WHERE person_id=? ORDER BY id DESC LIMIT 10", p["id"])
-    d["arrests"] = s.q("SELECT m.first_seen match_seen, r.* FROM mcso_matches m JOIN mcso_roster r ON r.booking_no=m.booking_no WHERE m.person_id=? ORDER BY m.id DESC", p["id"])
+    d["adcrr"] = [dict(c, hdr=json.loads(c["header_json"] or "{}")) for c in
+                  s.q("SELECT * FROM cases WHERE person_id=? AND site='adcrr' ORDER BY last_seen DESC", p["id"])]
     d["alerts"] = s.q("SELECT * FROM alerts WHERE person_id=? ORDER BY id DESC LIMIT 40", p["id"])
     lu = s.one("SELECT MAX(e.first_seen) m FROM entries e JOIN cases c ON c.id=e.case_id WHERE c.person_id=?", p["id"])
     d["last_update"] = (lu["m"] or "")[:16]
@@ -215,7 +218,7 @@ def names_edit():
     changed = (before["last"].strip().lower(), before["first"].strip().lower(), before["dob"]) != (f["last"].strip().lower(), f["first"].strip().lower(), dob)
     flash(f"Saved {f['last']}, {f['first']}" + (" - name/DOB changed" if changed else ""))
     if f.get("rerun") and changed:
-        job = run_job(f"re-search after edit: {f['last']}, {f['first']}", lambda j: full_run(j, "edited_person", [pid], [k for k in watch.SITES if watch.SITES[k][2] == "person"] + ["mcso"]))
+        job = run_job(f"re-search after edit: {f['last']}, {f['first']}", lambda j: full_run(j, "edited_person", [pid], [k for k in watch.SITES if watch.SITES[k][2] == "person"]))
         return redirect(f"/job/{job.id}")
     return redirect(f"/names?open={pid}")
 
@@ -228,7 +231,7 @@ def names_add():
     pid, created = store().add_person(f["last"], f["first"], dob, f.get("middle", ""), f.get("note", ""), 1 if f.get("is_me") else 0)
     flash(("Added " if created else "Already on the list: ") + f"{f['last']}, {f['first']}")
     if f.get("run_now"):
-        job = run_job(f"first search for {f['last']}, {f['first']}", lambda j: full_run(j, "new_person", [pid], [k for k in watch.SITES if watch.SITES[k][2] == "person"] + ["mcso"]))
+        job = run_job(f"first search for {f['last']}, {f['first']}", lambda j: full_run(j, "new_person", [pid], [k for k in watch.SITES if watch.SITES[k][2] == "person"]))
         return redirect(f"/job/{job.id}")
     return redirect("/names")
 
@@ -251,9 +254,6 @@ def search():
             rows = s.q("SELECT c.id, c.site, c.case_number, c.court, c.party_name, e.kind, e.date, e.text FROM entries e JOIN cases c ON c.id=e.case_id "
                        "WHERE e.text LIKE ? OR c.case_number LIKE ? OR c.party_name LIKE ? ORDER BY e.first_seen DESC LIMIT 300", like, like, like)
             results["Cases & rows"] = [[f'<a href="/case/{r["id"]}">{r["case_number"]}</a>', r["site"], r["court"], r["party_name"], r["kind"], r["date"], r["text"][:300]] for r in rows]
-        if "mcso" in local:
-            rows = s.q("SELECT * FROM mcso_roster WHERE name LIKE ? OR booking_no LIKE ? OR dob LIKE ? ORDER BY last_seen DESC LIMIT 200", like, like, like)
-            results["MCSO roster"] = [[f'<a href="{r["detail_url"]}" target="_blank">{r["booking_no"]}</a>', r["name"], r["dob"], r["status"], r["booking_date"], "gone " + r["gone_at"][:10] if r["gone_at"] else "listed"] for r in rows]
         if "chandler" in local:
             rows = s.q("SELECT * FROM chandler_bookings WHERE arrest_charge LIKE ? OR arrest_address LIKE ? OR related_offense_report_number LIKE ? OR arrest_number LIKE ? OR arrest_date LIKE ? ORDER BY arrest_date DESC LIMIT 200", like, like, like, like, like)
             results["Chandler bookings (no names in dataset)"] = [[r["arrest_number"], r["arrest_date"], r["arrest_charge"], r["arrest_address"], r["related_offense_report_number"]] for r in rows]
@@ -310,6 +310,14 @@ def search_live():
                     job.log(f"dps FAILED {e!r}")
             else:
                 job.log("dps skipped: needs DOB")
+        if "adcrr" in sites:
+            try:
+                from courtwatch.sites import adcrr
+                pairs, _ = adcrr.search_person(last, first[:1], person_dob=dob or "")
+                job.log(f"adcrr: {len(pairs)} hit(s) (name + first-initial only - no DOB field on this site)")
+                html += [f"<tr><td>adcrr</td><td>ADC#{h.case_number}</td><td>{h.party_name}</td><td>{cd.header.get('Age vs. stated DOB','')}</td></tr>" for h, cd in pairs]
+            except Exception as e:
+                job.log(f"adcrr FAILED {e!r}")
         job.result_html = "<table><tr><th>Site</th><th>Case</th><th>Party</th><th>DOB shown</th></tr>" + "".join(html) + "</table>" if html else "<div class='mut'>No results on the selected sites.</div>"
     job = run_job(f"live search: {last}, {first} {dob}", _fn)
     return redirect(f"/job/{job.id}")
@@ -337,8 +345,9 @@ def warrants_check():
 
 @app.get("/arrests")
 def arrests():
-    s = store(); mq, cq, pq = request.args.get("mq", "").strip(), request.args.get("cq", "").strip(), request.args.get("pq", "").strip()
-    mrows = s.q("SELECT * FROM mcso_roster WHERE name LIKE ? OR booking_no LIKE ? OR dob LIKE ? ORDER BY last_seen DESC LIMIT 200", f"%{mq}%", f"%{mq}%", f"%{mq}%") if mq else None
+    s = store(); cq, pq = request.args.get("cq", "").strip(), request.args.get("pq", "").strip()
+    adcrr_rows = [dict(c, hdr=json.loads(c["header_json"] or "{}")) for c in
+                  s.q("SELECT c.*, p.last p_last, p.first p_first FROM cases c JOIN people p ON p.id=c.person_id WHERE c.site='adcrr' ORDER BY c.last_seen DESC")]
     crows = None
     if cq:
         like = f"%{cq}%"
@@ -349,10 +358,9 @@ def arrests():
         for r in s.q("SELECT at, text FROM powerbi_captures WHERE text LIKE ? ORDER BY id DESC LIMIT 3", f"%{pq}%"):
             for m in list(re.finditer(re.escape(pq), r["text"], re.I))[:8]:
                 prows.append(f"[{r['at'][:16]}] ..." + r["text"][max(0, m.start() - 160):m.end() + 160] + "...")
-    matches = s.q("SELECT m.person_id, r.* FROM mcso_matches m JOIN mcso_roster r ON r.booking_no=m.booking_no ORDER BY m.id DESC")
-    return page(T.ARRESTS, "arrests", "Arrests", mcso=s.one("SELECT * FROM mcso_fetches ORDER BY id DESC LIMIT 1"), ch=s.one("SELECT * FROM chandler_fetches ORDER BY id DESC LIMIT 1"),
-                roster_total=s.one("SELECT COUNT(*) c FROM mcso_roster")["c"], ch_total=s.one("SELECT COUNT(*) c FROM chandler_bookings")["c"],
-                matches=matches, mq=mq, mrows=mrows, cq=cq, crows=crows, pq=pq, prows=prows,
+    return page(T.ARRESTS, "arrests", "Arrests", adcrr_rows=adcrr_rows, adcrr_url=ADCRR_URL, maricopa_url=MARICOPA_INMATE_URL,
+                ch=s.one("SELECT * FROM chandler_fetches ORDER BY id DESC LIMIT 1"), ch_total=s.one("SELECT COUNT(*) c FROM chandler_bookings")["c"],
+                cq=cq, crows=crows, pq=pq, prows=prows,
                 pbi=s.q("SELECT id, at, pages, responses, dir FROM powerbi_captures ORDER BY id DESC LIMIT 20"))
 
 @app.get("/payments")
@@ -421,8 +429,7 @@ def import_post():
     snap = base.save_snapshot(site, f"import:{cn}", f"file://{fname}", body, "text/html")
     s.snapshot(snap)
     title, entries = azcourts.parse_saved(body)
-    from courtwatch.sites import mcso as _mcso
-    url = {"azcourts": azcourts.URL, "maricopa_inmate": _mcso.MARICOPA_INMATE_URL}.get(site, "")
+    url = {"azcourts": azcourts.URL, "maricopa_inmate": MARICOPA_INMATE_URL}.get(site, "")
     cid, _ = s.upsert_case(pid, site, cn, court=request.form.get("court", ""), url=url, title=title)
     new = s.add_entries(cid, entries, snap, snap.url)
     s.x("INSERT INTO imports(at, site, person_id, filename, sha256, path, note, rows) VALUES (?,?,?,?,?,?,?,?)", now(), site, pid, fname, snap.sha256, snap.path, request.form.get("note", ""), len(entries))
