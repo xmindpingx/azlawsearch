@@ -14,7 +14,6 @@ Search, Payments, Warrants, Arrests, Names and Import tabs.
 | Mesa Municipal Court eCourt | headless Chromium | name search, then Balance/Pay, Events and Disposition pages per case; payment due dates feed the Payments tab and `.ics` reminders |
 | AZ DPS warrant search | direct fetch | needs a DOB; "found" lights the warrant badge |
 | Chandler PD arrest bookings CSV | direct fetch | open data; no names in the dataset |
-| `portal.mobileso.com` jail roster | direct fetch | **Mobile County (Alabama)** sheriff roster, retained and name-matched; labeled as such |
 | Power BI (gov) published report | headless Chromium | screenshots + raw data responses, text-searchable |
 | AZ Courts public access (`apps.azcourts.gov`) | manual import | image CAPTCHA, so: search in your browser, save the page, upload it on Import |
 | Maricopa County inmate lookup (`mcso.org/InmateInfo`) | manual import | reCAPTCHA checkbox, so: search there, save the page, import it; custody + bond badge come from the saved page |
